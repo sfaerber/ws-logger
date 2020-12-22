@@ -4,12 +4,13 @@ name = "ws-logger"
 version = "0.1.0"
 
 [dependencies]
-atty = "0.2"
 async-std = "1"
 async-tungstenite = {version = "0.10", features = ["async-std-runtime"]}
+atty = "0.2"
 chrono = "0.4"
 futures = "0.3"
 hostname = "0.3.1"
 lazy_static = "1.4"
 log = {version = "0.4", features = ["std"]}
 prost = "0.6"
+url = "2.2.0"

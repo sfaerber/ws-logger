@@ -14,6 +14,7 @@ use protobuf_model::{LogEntry, LogLevel};
 use prost::*;
 
 use async_tungstenite::{async_std::connect_async, tungstenite::Message as WebsocketMessage};
+use url::Url;
 
 mod protobuf_model;
 
@@ -40,39 +41,25 @@ lazy_static::lazy_static! {
 
 impl WebsocketLogger {
     #[must_use = "You must call init() to begin logging"]
-    pub fn new() -> WebsocketLogger {
+    pub fn new(log_target_url: &str) -> Result<WebsocketLogger, String> {
         //
+        let log_target_url = Url::parse(log_target_url)
+            .map_err(|err| format!("could not parse ws logget target url: {}", err))?;
+
         let (send_queue, receiver) = mpsc::channel::<Arc<LogEntry>>(BUFFER_SIZE);
 
-        async_std::task::spawn(run_websocket(receiver));
+        async_std::task::spawn(run_websocket(receiver, log_target_url));
 
-        WebsocketLogger {
+        Ok(WebsocketLogger {
             level: LevelFilter::Debug,
             send_queue: Arc::new(Mutex::new(send_queue)),
-        }
+        })
     }
 
     #[must_use = "You must call init() to begin logging"]
     pub fn with_level(mut self, level: LevelFilter) -> WebsocketLogger {
         self.level = level;
         self
-    }
-
-    #[must_use = "You must call init() to begin logging"]
-    pub fn from_env() -> WebsocketLogger {
-        //gets log level from environment variable "RUST_LOG"
-        let level = match std::env::var("RUST_LOG") {
-            Ok(x) => match x.to_lowercase().as_str() {
-                "trace" => log::LevelFilter::Trace,
-                "debug" => log::LevelFilter::Debug,
-                "info" => log::LevelFilter::Info,
-                "warn" => log::LevelFilter::Warn,
-                _ => log::LevelFilter::Error,
-            },
-            _ => log::LevelFilter::Error,
-        };
-
-        WebsocketLogger::new().with_level(level)
     }
 
     /// 'Init' the actual logger, instantiate it and configure it,
@@ -84,13 +71,6 @@ impl WebsocketLogger {
         log::set_max_level(self.level);
         log::set_boxed_logger(Box::new(self))?;
         Ok(())
-    }
-}
-
-impl Default for WebsocketLogger {
-    /// See [this](struct.SimpleLogger.html#method.new)
-    fn default() -> Self {
-        WebsocketLogger::new()
     }
 }
 
@@ -154,23 +134,21 @@ impl Log for WebsocketLogger {
     fn flush(&self) {}
 }
 
-//env für Websocket "FLEX_WS_LOGGER_TARGET"
-
-async fn run_websocket(rx: mpsc::Receiver<Arc<LogEntry>>) {
+async fn run_websocket(rx: mpsc::Receiver<Arc<LogEntry>>, mut log_target_url: Url) {
     //
     let (mut pong_tx, pong_rx) = mpsc::channel::<MessageToSend>(BUFFER_SIZE);
     //
     let mut source = futures::stream::select(pong_rx, rx.map(|r| MessageToSend::Payload(r)));
 
-    loop {
-        let url = "ws://localhost:3333";
+    log_target_url.set_path("ws-logger-target");
 
-        let ws_stream = match connect_async(url).await {
+    loop {
+        let ws_stream = match connect_async(&log_target_url).await {
             Ok((wss, _)) => wss,
             Err(err) => {
                 println!(
                     "WS LOGGER: could not etablish web socket connection to '{}': {}",
-                    url, err
+                    log_target_url, err
                 );
                 async_std::task::sleep(Duration::from_secs(5)).await;
                 continue;

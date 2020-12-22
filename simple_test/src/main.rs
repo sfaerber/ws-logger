@@ -4,10 +4,15 @@ use log::LevelFilter;
 use ws_logger::*;
 
 fn main() {
-    WebsocketLogger::new().with_level(LevelFilter::Debug).init().unwrap();
+    //env für Websocket "FLEX_WS_LOGGER_TARGET"
 
-    for i in 0..1_0  {
+    WebsocketLogger::new("ws://localhost")
+        .unwrap()
+        .with_level(LevelFilter::Debug)
+        .init()
+        .unwrap();
 
+    for i in 0..1_0 {
         log::warn!("IT WORKS warn {}", i);
 
         log::error!("IT WORKS error {}", i);
