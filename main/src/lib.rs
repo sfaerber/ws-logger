@@ -14,6 +14,7 @@ use protobuf_model::{LogEntry, LogLevel};
 use prost::*;
 
 use async_tungstenite::{async_std::connect_async, tungstenite::Message as WebsocketMessage};
+use regex::Regex;
 use url::Url;
 
 mod protobuf_model;
@@ -30,6 +31,7 @@ enum MessageToSend {
 pub struct WebsocketLogger {
     level: LevelFilter,
     send_queue: Arc<Mutex<mpsc::Sender<Arc<LogEntry>>>>,
+    target_filter: Option<Regex>,
 }
 
 lazy_static::lazy_static! {
@@ -53,12 +55,19 @@ impl WebsocketLogger {
         Ok(WebsocketLogger {
             level: LevelFilter::Debug,
             send_queue: Arc::new(Mutex::new(send_queue)),
+            target_filter: None,
         })
     }
 
     #[must_use = "You must call init() to begin logging"]
     pub fn with_level(mut self, level: LevelFilter) -> WebsocketLogger {
         self.level = level;
+        self
+    }
+
+    #[must_use = "You must call init() to begin logging"]
+    pub fn target_filter(mut self, target_filter: Regex) -> WebsocketLogger {
+        self.target_filter = Some(target_filter);
         self
     }
 
@@ -80,55 +89,63 @@ impl Log for WebsocketLogger {
     }
 
     fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let level_string = { record.level().to_string() };
-            let target = if !record.target().is_empty() {
-                record.target()
-            } else {
-                record.module_path().unwrap_or_default()
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        let level_string = { record.level().to_string() };
+        let target = if !record.target().is_empty() {
+            record.target()
+        } else {
+            record.module_path().unwrap_or_default()
+        };
+
+        if let Some(target_filter) = &self.target_filter {
+            if !target_filter.is_match(&target) {
+                return;
+            }
+        }
+
+        let now = Local::now().naive_local();
+
+        println!(
+            "{} {:<5} [{}] {}",
+            Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
+            level_string,
+            target,
+            record.args()
+        );
+
+        let entry = Arc::new(LogEntry {
+            message_type: 0,
+            host: HOSTNAME.clone(),
+            micro_second_timestamp: now.timestamp() * 1_000_000
+                + now.timestamp_subsec_micros() as i64,
+            log_level: (match record.level() {
+                Level::Error => LogLevel::Error,
+                Level::Warn => LogLevel::Warn,
+                Level::Info => LogLevel::Info,
+                Level::Debug => LogLevel::Debug,
+                Level::Trace => LogLevel::Trace,
+            }) as i32,
+            target: target.to_string(),
+            args: format!("{}", record.args()),
+        });
+
+        let send_queue = self.send_queue.clone();
+
+        async_std::task::spawn(async move {
+            let send = async {
+                let mut lck = send_queue.lock().await;
+                let _ = lck.send(entry).await;
+                drop(lck);
             };
 
-            let now = Local::now().naive_local();
-
-            println!(
-                "{} {:<5} [{}] {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
-                level_string,
-                target,
-                record.args()
-            );
-
-            let entry = Arc::new(LogEntry {
-                message_type: 0,
-                host: HOSTNAME.clone(),
-                micro_second_timestamp: now.timestamp() * 1_000_000
-                    + now.timestamp_subsec_micros() as i64,
-                log_level: (match record.level() {
-                    Level::Error => LogLevel::Error,
-                    Level::Warn => LogLevel::Warn,
-                    Level::Info => LogLevel::Info,
-                    Level::Debug => LogLevel::Debug,
-                    Level::Trace => LogLevel::Trace,
-                }) as i32,
-                target: target.to_string(),
-                args: format!("{}", record.args()),
-            });
-
-            let send_queue = self.send_queue.clone();
-
-            async_std::task::spawn(async move {
-                let send = async {
-                    let mut lck = send_queue.lock().await;
-                    let _ = lck.send(entry).await;
-                    drop(lck);
-                };
-
-                futures::select! {
-                    _ = send.fuse() => (),
-                    _ = async_std::task::sleep(Duration::from_secs(1)).fuse() => (),
-                }
-            });
-        }
+            futures::select! {
+                _ = send.fuse() => (),
+                _ = async_std::task::sleep(Duration::from_secs(1)).fuse() => (),
+            }
+        });
     }
 
     fn flush(&self) {}
